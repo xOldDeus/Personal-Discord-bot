@@ -51,13 +51,14 @@ async def on_ready():
     reminder_check.start()
 
 @bot.command()
-async def reminder(ctx, dt: str, *, text: str):
+async def reminder(ctx, date: str, time: str, *, text: str):
     """
     Set a reminder.
     Usage: !reminder YYYY-MM-DD HH:MM Task details
     Example: !reminder 2025-08-05 14:30 Doctor appointment
     """
-    dt_parsed = parse_datetime(dt)
+    dt_str = f"{date} {time}"
+    dt_parsed = parse_datetime(dt_str)
     if not dt_parsed:
         await ctx.send("Invalid date format! Use YYYY-MM-DD HH:MM (24hr). Example: 2025-08-05 14:30")
         return
@@ -65,12 +66,12 @@ async def reminder(ctx, dt: str, *, text: str):
     reminders.append({
         "user_id": ctx.author.id,
         "text": text,
-        "time": dt,
+        "time": dt_str,
         "repeat": None,
         "notify_before": []
     })
     save_reminders(reminders)
-    await ctx.send(f"Reminder set for {dt}: {text}")
+    await ctx.send(f"Reminder set for {dt_str}: {text}")
 
 @bot.command()
 async def reminders(ctx):
@@ -91,13 +92,14 @@ async def reminders(ctx):
         await ctx.send(f"Your reminders:\n{msg}")
 
 @bot.command()
-async def repeatreminder(ctx, interval: str, dt: str, *, text: str):
+async def repeatreminder(ctx, interval: str, date: str, time: str, *, text: str):
     """
     Set a repeated reminder.
-    Usage: !repeatreminder daily 2025-08-05 14:30 Meeting
-    Intervals: daily, weekly
+    Usage: !repeatreminder [daily|weekly] YYYY-MM-DD HH:MM Task details
+    Example: !repeatreminder daily 2025-08-05 14:30 Take Meds
     """
-    dt_parsed = parse_datetime(dt)
+    dt_str = f"{date} {time}"
+    dt_parsed = parse_datetime(dt_str)
     if not dt_parsed or interval not in ["daily", "weekly"]:
         await ctx.send("Invalid format! Use: !repeatreminder [daily|weekly] YYYY-MM-DD HH:MM Task")
         return
@@ -105,12 +107,12 @@ async def repeatreminder(ctx, interval: str, dt: str, *, text: str):
     reminders.append({
         "user_id": ctx.author.id,
         "text": text,
-        "time": dt,
+        "time": dt_str,
         "repeat": interval,
         "notify_before": []
     })
     save_reminders(reminders)
-    await ctx.send(f"Repeating reminder set for {dt} ({interval}): {text}")
+    await ctx.send(f"Repeating reminder set for {dt_str} ({interval}): {text}")
 
 @bot.command()
 async def notifyme(ctx, before: str, idx: int):
