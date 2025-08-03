@@ -2,7 +2,25 @@ import discord
 from discord.ext import commands, tasks
 import json
 from datetime import datetime, timedelta
+import os
+import threading
+from flask import Flask
 
+# --- Flask Keep-Alive for Render Web Service ---
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Bot is running!"
+
+def run():
+    app.run(host='0.0.0.0', port=8080)
+
+def keep_alive():
+    t = threading.Thread(target=run)
+    t.start()
+
+# --- Discord Bot Setup ---
 intents = discord.Intents.default()
 intents.message_content = True
 
@@ -22,7 +40,6 @@ def save_reminders(reminders):
         json.dump(reminders, f)
 
 def parse_datetime(dt_str):
-    # Expects 'YYYY-MM-DD HH:MM'
     try:
         return datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
     except:
@@ -68,7 +85,9 @@ async def reminders(ctx):
     else:
         msg = ""
         for idx, r in enumerate(user_reminders, 1):
-            msg += f"{idx}. {r['time']}: {r['text']}\n"
+            nb = ', '.join([f"{n}min" for n in r.get('notify_before', [])]) if r.get('notify_before') else 'None'
+            rep = r.get('repeat') if r.get('repeat') else 'None'
+            msg += f"{idx}. {r['time']}: {r['text']} | Repeat: {rep} | Notify before: {nb}\n"
         await ctx.send(f"Your reminders:\n{msg}")
 
 @bot.command()
@@ -100,13 +119,13 @@ async def notifyme(ctx, before: str, idx: int):
     Usage: !notifyme 1h 2
     (Sets a notification for reminder #2 one hour before)
     """
-    # Parse 'before' as minutes/hours/days (e.g., '30m', '2h', '1d')
     reminders = load_reminders()
     user_reminders = [r for r in reminders if r['user_id'] == ctx.author.id]
     if idx < 1 or idx > len(user_reminders):
         await ctx.send("Invalid reminder number.")
         return
     r = user_reminders[idx-1]
+    # Parse 'before' as minutes/hours/days (e.g., '30m', '2h', '1d')
     mult = {'m': 1, 'h': 60, 'd': 1440}
     try:
         unit = before[-1]
@@ -160,4 +179,6 @@ async def reminder_check():
     reminders = [r for i, r in enumerate(reminders) if i not in to_remove]
     save_reminders(reminders)
 
-bot.run('YOUR_BOT_TOKEN')
+# --- Run everything! ---
+keep_alive()
+bot.run(os.environ['DISCORD_TOKEN'])
