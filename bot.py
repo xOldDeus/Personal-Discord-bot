@@ -2,8 +2,9 @@ import discord
 from discord import app_commands
 from discord.ext import tasks
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import os
+import pytz
 import threading
 from flask import Flask
 
@@ -23,12 +24,11 @@ def keep_alive():
 
 # --- Discord Bot Setup ---
 intents = discord.Intents.default()
-intents.message_content = True
-
 bot = discord.Client(intents=intents)
 tree = app_commands.CommandTree(bot)
 
 REMINDERS_FILE = 'reminders.json'
+EASTERN = pytz.timezone("US/Eastern")
 
 def load_reminders():
     try:
@@ -41,11 +41,12 @@ def save_reminders(reminders):
     with open(REMINDERS_FILE, 'w') as f:
         json.dump(reminders, f)
 
-def parse_datetime(dt_str):
-    try:
-        return datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
-    except:
-        return None
+def parse_datetime_eastern(date_str, time_str):
+    # Convert user input (Eastern) to UTC
+    dt_naive = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+    dt_eastern = EASTERN.localize(dt_naive)
+    dt_utc = dt_eastern.astimezone(timezone.utc)
+    return dt_utc
 
 @bot.event
 async def on_ready():
@@ -57,28 +58,55 @@ async def on_ready():
         print(f'Error syncing commands: {e}')
     reminder_check.start()
 
-# --- SLASH COMMANDS ---
-
-@tree.command(name="reminder", description="Set a reminder (YYYY-MM-DD HH:MM Task)")
-@app_commands.describe(date="Date in YYYY-MM-DD", time="Time in 24h format HH:MM", text="Task to remind you about")
-async def reminder(interaction: discord.Interaction, date: str, time: str, text: str):
-    dt_str = f"{date} {time}"
-    dt_parsed = parse_datetime(dt_str)
-    if not dt_parsed:
-        await interaction.response.send_message("Invalid date format! Use YYYY-MM-DD HH:MM (24hr). Example: 2025-08-05 14:30", ephemeral=True)
+@tree.command(name="reminder", description="Set a reminder in your local (Michigan) time.")
+@app_commands.describe(
+    date="Date (YYYY-MM-DD, Michigan time)",
+    time="Time (24hr HH:MM, Michigan time)",
+    text="What should I remind you about?",
+    notify_before="When to remind you before the event"
+)
+@app_commands.choices(notify_before=[
+    app_commands.Choice(name="1 minute before", value="1"),
+    app_commands.Choice(name="5 minutes before", value="5"),
+    app_commands.Choice(name="10 minutes before", value="10"),
+    app_commands.Choice(name="30 minutes before", value="30"),
+    app_commands.Choice(name="1 hour before", value="60"),
+    app_commands.Choice(name="6 hours before", value="360"),
+    app_commands.Choice(name="12 hours before", value="720"),
+    app_commands.Choice(name="1 day before", value="1440"),
+])
+async def reminder(
+    interaction: discord.Interaction,
+    date: str,
+    time: str,
+    text: str,
+    notify_before: app_commands.Choice[str]
+):
+    # Convert to UTC
+    try:
+        dt_utc = parse_datetime_eastern(date, time)
+        dt_str_utc = dt_utc.strftime("%Y-%m-%d %H:%M")
+    except Exception as e:
+        await interaction.response.send_message(
+            "Invalid date/time format! Use YYYY-MM-DD for date and 24hr HH:MM for time.",
+            ephemeral=True)
         return
     reminders = load_reminders()
     reminders.append({
         "user_id": interaction.user.id,
         "text": text,
-        "time": dt_str,
-        "repeat": None,
-        "notify_before": []
+        "time_utc": dt_str_utc,
+        "notify_before_min": int(notify_before.value)
     })
     save_reminders(reminders)
-    await interaction.response.send_message(f"Reminder set for {dt_str}: {text}", ephemeral=True)
+    eastern_dt_str = dt_utc.astimezone(EASTERN).strftime("%Y-%m-%d %I:%M %p")
+    notify_str = f"{notify_before.name}"
+    await interaction.response.send_message(
+        f"Reminder set for **{eastern_dt_str} (Michigan time)**: {text}\n"
+        f"You'll also get notified: **{notify_str}**",
+        ephemeral=True)
 
-@tree.command(name="reminders", description="List your reminders")
+@tree.command(name="reminders", description="List your reminders.")
 async def reminders(interaction: discord.Interaction):
     reminders = load_reminders()
     user_reminders = [r for r in reminders if r['user_id'] == interaction.user.id]
@@ -87,89 +115,65 @@ async def reminders(interaction: discord.Interaction):
     else:
         msg = ""
         for idx, r in enumerate(user_reminders, 1):
-            nb = ', '.join([f"{n}min" for n in r.get('notify_before', [])]) if r.get('notify_before') else 'None'
-            rep = r.get('repeat') if r.get('repeat') else 'None'
-            msg += f"{idx}. {r['time']}: {r['text']} | Repeat: {rep} | Notify before: {nb}\n"
+            # Show time in Michigan time for clarity
+            event_time = datetime.strptime(r['time_utc'], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+            local_time = event_time.astimezone(EASTERN)
+            time_str = local_time.strftime("%Y-%m-%d %I:%M %p")
+            nb = r['notify_before_min']
+            if nb < 60:
+                nb_str = f"{nb} min"
+            elif nb == 60:
+                nb_str = "1 hour"
+            elif nb < 1440:
+                nb_str = f"{nb // 60} hours"
+            else:
+                nb_str = "1 day"
+            msg += f"{idx}. {time_str}: {r['text']} | Notify: {nb_str} before\n"
         await interaction.response.send_message(f"Your reminders:\n{msg}", ephemeral=True)
 
-@tree.command(name="repeatreminder", description="Set a repeated reminder (daily/weekly)")
-@app_commands.describe(interval="Repeat interval: daily or weekly", date="Date in YYYY-MM-DD", time="Time in 24h format HH:MM", text="Task")
-async def repeatreminder(interaction: discord.Interaction, interval: str, date: str, time: str, text: str):
-    dt_str = f"{date} {time}"
-    dt_parsed = parse_datetime(dt_str)
-    if not dt_parsed or interval not in ["daily", "weekly"]:
-        await interaction.response.send_message("Invalid format! Use: interval: daily/weekly, date: YYYY-MM-DD, time: HH:MM (24hr), text: task", ephemeral=True)
-        return
-    reminders = load_reminders()
-    reminders.append({
-        "user_id": interaction.user.id,
-        "text": text,
-        "time": dt_str,
-        "repeat": interval,
-        "notify_before": []
-    })
-    save_reminders(reminders)
-    await interaction.response.send_message(f"Repeating reminder set for {dt_str} ({interval}): {text}", ephemeral=True)
-
-@tree.command(name="notifyme", description="Add a notification before a reminder")
-@app_commands.describe(before="e.g. 1h, 30m, 1d", idx="Reminder number as shown in /reminders")
-async def notifyme(interaction: discord.Interaction, before: str, idx: int):
-    reminders = load_reminders()
-    user_reminders = [r for r in reminders if r['user_id'] == interaction.user.id]
-    if idx < 1 or idx > len(user_reminders):
-        await interaction.response.send_message("Invalid reminder number.", ephemeral=True)
-        return
-    r = user_reminders[idx-1]
-    mult = {'m': 1, 'h': 60, 'd': 1440}
-    try:
-        unit = before[-1]
-        value = int(before[:-1])
-        minutes = value * mult[unit]
-    except:
-        await interaction.response.send_message("Invalid time format! Use numbers followed by m (minutes), h (hours), or d (days), e.g., 10m, 2h, 1d", ephemeral=True)
-        return
-    for rem in reminders:
-        if rem == r:
-            rem.setdefault('notify_before', []).append(minutes)
-    save_reminders(reminders)
-    await interaction.response.send_message(f"Will remind you {before} before for reminder #{idx}", ephemeral=True)
+@tree.command(name="servertime", description="See the bot's current UTC and Michigan time.")
+async def servertime(interaction: discord.Interaction):
+    now_utc = datetime.utcnow()
+    now_et = datetime.now(EASTERN)
+    await interaction.response.send_message(
+        f"Server time (UTC): {now_utc.strftime('%Y-%m-%d %H:%M')}\n"
+        f"Michigan time: {now_et.strftime('%Y-%m-%d %I:%M %p')}",
+        ephemeral=True
+    )
 
 @tasks.loop(minutes=1)
 async def reminder_check():
     reminders = load_reminders()
-    now = datetime.now()
+    now_utc = datetime.utcnow().replace(second=0, microsecond=0)
     to_remove = []
     for idx, r in enumerate(reminders):
-        dt = parse_datetime(r['time'])
+        dt_utc = datetime.strptime(r['time_utc'], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
         user = await bot.fetch_user(r['user_id'])
-        # Notify 'before'
-        for nb in r.get('notify_before', []):
-            notify_time = dt - timedelta(minutes=nb)
-            if notify_time <= now < notify_time + timedelta(seconds=59):
-                if user:
-                    try:
-                        await user.send(f"⏰ (Pre-Reminder) **{r['text']}** at {r['time']}")
-                    except:
-                        pass
-        # Main reminder
-        if dt <= now < dt + timedelta(seconds=59):
+        # Notify before
+        notify_time = dt_utc - timedelta(minutes=r['notify_before_min'])
+        if notify_time <= now_utc < notify_time + timedelta(seconds=59):
             if user:
                 try:
-                    await user.send(f"🔔 Reminder: **{r['text']}** (scheduled for {r['time']})")
-                except:
-                    pass
-            if r.get('repeat') == 'daily':
-                next_dt = dt + timedelta(days=1)
-                r['time'] = next_dt.strftime("%Y-%m-%d %H:%M")
-            elif r.get('repeat') == 'weekly':
-                next_dt = dt + timedelta(weeks=1)
-                r['time'] = next_dt.strftime("%Y-%m-%d %H:%M")
-            else:
-                to_remove.append(idx)
+                    local_time = dt_utc.astimezone(EASTERN).strftime("%Y-%m-%d %I:%M %p")
+                    await user.send(
+                        f"⏰ Heads up! You have an upcoming event: **{r['text']}** at **{local_time} (Michigan time)**"
+                    )
+                except Exception as e:
+                    print(f"Could not send pre-reminder DM: {e}")
+        # Main event
+        if dt_utc <= now_utc < dt_utc + timedelta(seconds=59):
+            if user:
+                try:
+                    local_time = dt_utc.astimezone(EASTERN).strftime("%Y-%m-%d %I:%M %p")
+                    await user.send(
+                        f"🔔 Reminder: **{r['text']}** is happening now! ({local_time} Michigan time)"
+                    )
+                except Exception as e:
+                    print(f"Could not send main reminder DM: {e}")
+            to_remove.append(idx)
+    # Remove sent reminders
     reminders = [r for i, r in enumerate(reminders) if i not in to_remove]
     save_reminders(reminders)
 
-# --- Run everything! ---
 keep_alive()
 bot.run(os.environ['DISCORD_TOKEN'])
-
