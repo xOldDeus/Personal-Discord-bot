@@ -58,10 +58,10 @@ async def on_ready():
         print(f'Error syncing commands: {e}')
     reminder_check.start()
 
-@tree.command(name="reminder", description="Set a reminder in your local (Michigan) time.")
+@tree.command(name="reminder", description="Set a reminder in your local (EST) time.")
 @app_commands.describe(
-    date="Date (YYYY-MM-DD, Michigan time)",
-    time="Time (24hr HH:MM, Michigan time)",
+    date="Date (YYYY-MM-DD, EST time)",
+    time="Time (24hr HH:MM, EST time)",
     text="What should I remind you about?",
     notify_before="When to remind you before the event"
 )
@@ -102,7 +102,7 @@ async def reminder(
     eastern_dt_str = dt_utc.astimezone(EASTERN).strftime("%Y-%m-%d %I:%M %p")
     notify_str = f"{notify_before.name}"
     await interaction.response.send_message(
-        f"Reminder set for **{eastern_dt_str} (Michigan time)**: {text}\n"
+        f"Reminder set for **{eastern_dt_str} (EST time)**: {text}\n"
         f"You'll also get notified: **{notify_str}**",
         ephemeral=True)
 
@@ -115,7 +115,7 @@ async def reminders(interaction: discord.Interaction):
     else:
         msg = ""
         for idx, r in enumerate(user_reminders, 1):
-            # Show time in Michigan time for clarity
+            # Show time in EST time for clarity
             event_time = datetime.strptime(r['time_utc'], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
             local_time = event_time.astimezone(EASTERN)
             time_str = local_time.strftime("%Y-%m-%d %I:%M %p")
@@ -131,42 +131,45 @@ async def reminders(interaction: discord.Interaction):
             msg += f"{idx}. {time_str}: {r['text']} | Notify: {nb_str} before\n"
         await interaction.response.send_message(f"Your reminders:\n{msg}", ephemeral=True)
 
-@tree.command(name="servertime", description="See the bot's current UTC and Michigan time.")
+@tree.command(name="servertime", description="See the bot's current UTC and EST time.")
 async def servertime(interaction: discord.Interaction):
     now_utc = datetime.utcnow()
     now_et = datetime.now(EASTERN)
     await interaction.response.send_message(
         f"Server time (UTC): {now_utc.strftime('%Y-%m-%d %H:%M')}\n"
-        f"Michigan time: {now_et.strftime('%Y-%m-%d %I:%M %p')}",
+        f"EST time: {now_et.strftime('%Y-%m-%d %I:%M %p')}",
         ephemeral=True
     )
 
 @tasks.loop(minutes=1)
 async def reminder_check():
     reminders = load_reminders()
-    now_utc = datetime.utcnow().replace(second=0, microsecond=0)
+    now_utc = datetime.utcnow().replace(second=0, microsecond=0, tzinfo=timezone.utc)
     to_remove = []
     for idx, r in enumerate(reminders):
         dt_utc = datetime.strptime(r['time_utc'], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
         user = await bot.fetch_user(r['user_id'])
-        # Notify before
         notify_time = dt_utc - timedelta(minutes=r['notify_before_min'])
-        if notify_time <= now_utc < notify_time + timedelta(seconds=59):
+
+        print(f"Now (UTC): {now_utc}, Notify time: {notify_time}, Main event: {dt_utc}")
+
+        # Notify before
+        if notify_time == now_utc:
             if user:
+                local_time = dt_utc.astimezone(EASTERN).strftime("%Y-%m-%d %I:%M %p")
                 try:
-                    local_time = dt_utc.astimezone(EASTERN).strftime("%Y-%m-%d %I:%M %p")
                     await user.send(
-                        f"⏰ Heads up! You have an upcoming event: **{r['text']}** at **{local_time} (Michigan time)**"
+                        f"⏰ Heads up! You have an upcoming event: **{r['text']}** at **{local_time} (EST time)**"
                     )
                 except Exception as e:
                     print(f"Could not send pre-reminder DM: {e}")
         # Main event
-        if dt_utc <= now_utc < dt_utc + timedelta(seconds=59):
+        if dt_utc == now_utc:
             if user:
+                local_time = dt_utc.astimezone(EASTERN).strftime("%Y-%m-%d %I:%M %p")
                 try:
-                    local_time = dt_utc.astimezone(EASTERN).strftime("%Y-%m-%d %I:%M %p")
                     await user.send(
-                        f"🔔 Reminder: **{r['text']}** is happening now! ({local_time} Michigan time)"
+                        f"🔔 Reminder: **{r['text']}** is happening now! ({local_time} EST time)"
                     )
                 except Exception as e:
                     print(f"Could not send main reminder DM: {e}")
